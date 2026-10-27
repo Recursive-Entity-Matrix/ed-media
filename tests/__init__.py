@@ -1,0 +1,1 @@
+"""EDMedia automated test suite."""

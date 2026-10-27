@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "edmedia"
+version = "1.0.0"
+description = "Cross-platform functional replacement for the Elite Dangerous GalNet media player"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "EDMedia Contributors" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Games/Entertainment",
+    "Topic :: Multimedia :: Sound/Audio"
+]
+dependencies = [
+    "psutil>=5.9.0",
+    "pefile>=2023.2.7"
+]
+
+[project.optional-dependencies]
+linux = [
+    "dbus-python>=1.2.18"
+]
+windows = [
+    "winsdk>=1.0.0; sys_platform == 'win32'"
+]
+dev = [
+    "pyinstaller>=5.0.0"
+]
+
+[project.scripts]
+edmedia = "edmedia.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["edmedia*"]
