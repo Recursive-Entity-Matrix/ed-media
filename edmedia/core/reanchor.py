@@ -236,6 +236,12 @@ class ReAnchorEngine:
                     slot=self.REFRESH_VTABLE_SLOT_OFFSET,
                     confidence=1.0,
                 )
+                report.audio_player_vtable = AnchorTarget(
+                    name="AudioPlayerVtable",
+                    rva=vrva + 0x38,
+                    va=vva + 0x38,
+                    confidence=1.0,
+                )
                 resolved_count += 1
 
         report.confidence = resolved_count / total_targets
@@ -284,6 +290,11 @@ def main() -> None:
         slot_str = f"+{hex(rv.slot)}" if rv.slot else "-"
         status = "OK (100%)" if rv.confidence == 1.0 else "MISSING"
         print(f"{rv.name:<32} {slot_str:<10} {hex(rv.rva):<14} {hex(rv.va):<18} {status}")
+
+    if report.audio_player_vtable:
+        ap = report.audio_player_vtable
+        status = "OK (100%)" if ap.confidence == 1.0 else "MISSING"
+        print(f"{ap.name:<32} {'-':<10} {hex(ap.rva):<14} {hex(ap.va):<18} {status}")
 
     print("=" * 78)
 

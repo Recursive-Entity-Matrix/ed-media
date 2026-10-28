@@ -162,7 +162,11 @@ class LinuxMPRISController(MediaController):
             logger.info("Sent %s to %s", method_name, player_name)
             return True
         except Exception as e:
-            logger.error("Failed to send %s to %s: %s", method_name, player_name, e)
+            err_msg = str(e)
+            if "not available now" in err_msg or "ActionNotSupported" in err_msg or "UnknownMethod" in err_msg:
+                logger.info("%s is not available on player %s (single track/end of queue)", method_name, player_name)
+            else:
+                logger.warning("Failed to send %s to %s: %s", method_name, player_name, e)
             return False
 
     def play_pause(self) -> bool:

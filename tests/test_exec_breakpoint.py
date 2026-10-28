@@ -84,6 +84,49 @@ class TestExecBreakpoint(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_bypass_button_action(self):
+        """Verify _bypass_button_action sets up stack frame, moves rbx, and redirects rip to +0x12."""
+        if sys.platform != "linux":
+            self.skipTest("Linux only")
+
+        from edmedia.debug.linux_ptrace import UserRegsStruct
+        import struct
+
+        report = AnchorReport()
+        tracer = LinuxPtraceTracer(12345, report)
+
+        # Mock write_bytes and ptrace calls
+        written_memory = {}
+        tracer.write_bytes = lambda addr, data: written_memory.update({addr: data}) or True
+        tracer._ptrace = lambda *args: 0
+
+        regs = UserRegsStruct()
+        regs.rsp = 0x7FFF0000
+        regs.rbx = 0xDEADBEEFCAFE1234
+        regs.rdx = 0x1122334455667788  # Event shared_ptr
+        regs.rip = 0x1444F9380
+        regs.eflags = 0x10202  # RF set
+
+        bp_addr = 0x1444F9380
+        tracer._bypass_button_action(12345, regs, bp_addr)
+
+        # 1. Shadow space + rbx pushed: 0x20 + 0x08 = 0x28
+        self.assertEqual(regs.rsp, 0x7FFF0000 - 0x28)
+
+        # 2. Caller's rbx written to [original_rsp - 8]
+        saved_rbx_bytes = written_memory.get(0x7FFF0000 - 8)
+        self.assertIsNotNone(saved_rbx_bytes)
+        self.assertEqual(struct.unpack("<Q", saved_rbx_bytes)[0], 0xDEADBEEFCAFE1234)
+
+        # 3. rbx receives rdx (shared_ptr pointer)
+        self.assertEqual(regs.rbx, 0x1122334455667788)
+
+        # 4. rip redirected past call [rax + slot] to +0x12 (epilogue start)
+        self.assertEqual(regs.rip, bp_addr + 0x12)
+
+        # 5. RF flag cleared
+        self.assertEqual(regs.eflags & 0x10000, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

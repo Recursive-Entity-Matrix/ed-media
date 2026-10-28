@@ -121,6 +121,71 @@ class TestPlaylist(unittest.TestCase):
         # Verify duration updated to seconds
         self.assertEqual(self.io.read_u32(array_addr + 0x20), 243)
 
+    def test_pe_binary_protection(self):
+        """Verify that any write attempting to touch PE binary space is strictly blocked."""
+        pe_text_addr = 0x1400039F0
+        pe_rdata_addr = 0x145337328
+
+        # 1. Direct SafeMemoryIO write protection
+        self.assertFalse(self.io.is_safe_write_addr(pe_text_addr, 8))
+        self.assertFalse(self.io.is_safe_write_addr(pe_rdata_addr, 40))
+        self.assertFalse(self.io.write_u64(pe_text_addr, 0x12345678))
+        self.assertFalse(self.io.write_bytes(pe_text_addr, b"Code Blue Cam\x00"))
+
+        # 2. RefcountedString write protection
+        s = RefcountedString(self.io, pe_text_addr)
+        self.assertFalse(s.write_text("Corrupting Binary"))
+
+    def test_resolve_audio_player_from_ui_component(self):
+        """Verify that UI component delegate is safely resolved to true AudioPlayer."""
+        ui_delegate_addr = 0x5000
+        handle_addr = 0x6000
+        mgr_addr = 0x7000
+        audio_player_addr = 0x8000
+        p10_addr = 0x9000
+        p18_addr = 0xA000
+        p30_addr = 0xB000
+
+        # UI delegate vtable: 0x145336F10 (Play/Pause)
+        self.io.write_u64(ui_delegate_addr, 0x145336F10)
+
+        # Handle pointer at ui_delegate + 0x528
+        self.io.write_u64(ui_delegate_addr + 0x528, handle_addr)
+
+        # Handle structure: +0xC8 is mgr pointer
+        self.io.write_u64(handle_addr + 0xC8, mgr_addr)
+
+        # Manager structure: rcx_mgr = mgr - 0x30
+        rcx_mgr = mgr_addr - 0x30
+        self.io.write_u64(rcx_mgr + 0x10, p10_addr)
+        self.io.write_u64(rcx_mgr + 0x18, p18_addr)
+
+        # p10 structure: +0x30 is p30_addr
+        self.io.write_u64(p10_addr + 0x30, p30_addr)
+
+        # Lookup table at p30: token 0x409 * 2 = 0x812
+        token = 0x409
+        slot_idx = 5
+        self.io.write_u64(p30_addr + (token * 2) * 8, slot_idx)
+
+        # Object table at p18: slot 5 is audio_player_addr
+        self.io.write_u64(p18_addr + (slot_idx * 8), audio_player_addr)
+
+        # AudioPlayer vtable at 0x8000 is 0x1455799C8
+        self.io.write_u64(audio_player_addr, 0x1455799C8)
+
+        # Initialize manager with mock memory
+        mgr = PlaylistManager(self.mem, expected_vtable_va=0x145579990)
+
+        # Attempt to set controller with the UI delegate
+        mgr.set_controller(ui_delegate_addr)
+
+        # Manager MUST have resolved the controller to audio_player_addr (0x8000), NOT 0x5000!
+        self.assertEqual(mgr.controller_address, audio_player_addr)
+
+        # Cached pointer at ui_delegate + 0x538 must be filled with audio_player_addr
+        self.assertEqual(self.io.read_u64(ui_delegate_addr + 0x538), audio_player_addr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -97,18 +97,38 @@ class EDMediaDaemon:
             try:
                 self.playlist_mgr.update_first_item(self.poller.current_track)
             except Exception as e:
-                logger.debug("Could not update playlist item: %s", e)
+                logger.error("Could not update playlist item on button press: %s", e)
 
     def handle_track_changed(self, track: TrackInfo) -> None:
         """Invoked when desktop media changes tracks."""
         logger.info("Applying track to cockpit UI: %s", track.display_line)
         if hasattr(self, "playlist_mgr"):
             try:
-                self.playlist_mgr.update_first_item(track)
+                if not self.playlist_mgr.controller_address and hasattr(self, "report"):
+                    if self.report.refresh_vtable and self.report.refresh_vtable.va > 0:
+                        vtable_va = self.tracer.to_runtime_va(self.report.refresh_vtable.rva)
+                        self.playlist_mgr.find_active_controller(vtable_va)
+
+                if self.playlist_mgr.controller_address:
+                    self.playlist_mgr.update_first_item(track)
             except Exception as e:
-                logger.debug("Could not update playlist item: %s", e)
+                logger.error("Could not update playlist item on track change: %s", e)
         if hasattr(self, "tracer"):
             self.tracer.request_ui_refresh()
+
+    def handle_periodic_sync(self, track: TrackInfo) -> None:
+        """Periodically ensures the in-game playlist is clamped and displaying desktop media."""
+        if hasattr(self, "playlist_mgr"):
+            try:
+                if not self.playlist_mgr.controller_address and hasattr(self, "report"):
+                    if self.report.refresh_vtable and self.report.refresh_vtable.va > 0:
+                        vtable_va = self.tracer.to_runtime_va(self.report.refresh_vtable.rva)
+                        self.playlist_mgr.find_active_controller(vtable_va)
+
+                if self.playlist_mgr.controller_address:
+                    self.playlist_mgr.update_first_item(track)
+            except Exception:
+                pass
 
     def run_session(self, pid: int) -> None:
         """Run an attached session against the running game process."""
@@ -117,6 +137,7 @@ class EDMediaDaemon:
         # 1. Analyze and re-anchor target binary
         engine = ReAnchorEngine(self.explicit_exe_path)
         report = engine.analyze()
+        self.report = report
         logger.info("PE Re-Anchor Confidence: %.1f%%", report.confidence * 100)
 
         # 2. Initialize Tracer and configure hooks
@@ -133,7 +154,13 @@ class EDMediaDaemon:
             def write_bytes(self, address: int, data: bytes) -> bool:
                 return self.tracer.write_bytes(address, data)
 
-        self.playlist_mgr = PlaylistManager(TracerMemoryAccessor(self.tracer))
+        expected_vt = self.tracer.to_runtime_va(report.refresh_vtable.rva) if report.refresh_vtable else None
+        self.playlist_mgr = PlaylistManager(
+            TracerMemoryAccessor(self.tracer),
+            image_base=report.image_base,
+            image_size=0x6500000,
+            expected_vtable_va=expected_vt,
+        )
 
         # 4. Attach and arm hardware breakpoints across all threads
         if not self.tracer.attach():
@@ -143,10 +170,16 @@ class EDMediaDaemon:
         thread_count = len(getattr(self.tracer, "_attached_threads", []))
         logger.info("Successfully attached to PID %d (%d threads armed with DR0-DR2)", pid, thread_count)
 
-        # 5. Start Media Poller
+        # 4b. Auto-discover AudioPlayer controller in heap memory if already instantiated
+        if report.refresh_vtable and report.refresh_vtable.va > 0:
+            runtime_vtable = self.tracer.to_runtime_va(report.refresh_vtable.rva)
+            self.playlist_mgr.find_active_controller(runtime_vtable)
+
+        # 5. Start Media Poller with change detection and periodic background sync
         self.poller = MediaPoller(
             self.media_controller,
             on_track_changed=self.handle_track_changed,
+            on_periodic_sync=self.handle_periodic_sync,
             poll_interval=self.poll_interval,
         )
         self.poller.start()

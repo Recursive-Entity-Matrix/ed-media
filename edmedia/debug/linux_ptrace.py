@@ -393,9 +393,25 @@ class LinuxPtraceTracer(BaseTracer):
                         if self.pending_ui_refresh:
                             if self.on_ui_refresh:
                                 self.on_ui_refresh(tid)
-                            self.pending_ui_refresh = False
                 except Exception as e:
                     logger.exception("Error during breakpoint trap callback: %s", e)
+
+            # CRITICAL: For cockpit button traps, BLOCK the in-game action by skipping
+            # the virtual method call at offset 0x0c (`call [rax + slot]`)!
+            # All 4 button thunks have the exact 18-byte (0x12) prologue:
+            #   0x00: push rbx
+            #   0x02: sub rsp, 0x20
+            #   0x06: mov rax, [rcx]
+            #   0x09: mov rbx, rdx
+            #   0x0c: call [rax + slot]   <-- SKIP THIS CALL to block in-game audio!
+            #   0x12: mov rcx, [rbx]      <-- Epilogue starts here (shared_ptr cleanup & return)
+            # By simulating push rbx, sub rsp 0x20, mov rbx rdx and jumping directly to +0x12:
+            # 1. The in-game audio/queue action is COMPLETELY BLOCKED.
+            # 2. The event shared_ptr in rdx is properly decremented & destroyed.
+            # 3. Stack and rbx are safely restored when epilogue executes ret.
+            if bp.kind in (BreakpointKind.BUTTON_PLAY_PAUSE, BreakpointKind.BUTTON_NEXT, BreakpointKind.BUTTON_PREV):
+                self._bypass_button_action(tid, regs, bp.address)
+                return
 
         # Clear DR6 status register
         try:
@@ -412,15 +428,44 @@ class LinuxPtraceTracer(BaseTracer):
         except Exception as e:
             logger.debug("Failed to resume thread %d: %s", tid, e)
 
-    def _suppress_and_return(self, tid: int, regs: UserRegsStruct) -> None:
-        """Simulate a 'ret' instruction: redirect RIP to [RSP] and advance RSP by 8."""
+    def _bypass_button_action(self, tid: int, regs: UserRegsStruct, bp_address: int) -> None:
+        """Bypass the in-game virtual call and jump directly to the shared_ptr cleanup epilogue.
+
+        Bypasses the game's internal audio action while maintaining 100% ABI and stack/heap integrity.
+        """
         try:
-            # Read 64-bit return address from top of stack
-            ret_bytes = self.read_bytes(regs.rsp, 8)
-            if len(ret_bytes) == 8:
-                ret_addr = struct.unpack("<Q", ret_bytes)[0]
-                regs.rip = ret_addr
-                regs.rsp += 8
-                self._ptrace(PTRACE_SETREGS, tid, 0, ctypes.addressof(regs))
+            # 1. Simulate: push rbx (save caller's rbx at [rsp - 8])
+            new_rsp = regs.rsp - 8
+            self.write_bytes(new_rsp, struct.pack("<Q", regs.rbx))
+
+            # 2. Simulate: sub rsp, 0x20 (MSVC x64 shadow space)
+            new_rsp -= 0x20
+            regs.rsp = new_rsp
+
+            # 3. Simulate: mov rbx, rdx (store event shared_ptr pointer in rbx)
+            regs.rbx = regs.rdx
+
+            # 4. Redirect RIP to offset +0x12 (right after call [rax + slot])
+            regs.rip = bp_address + 0x12
+
+            # 5. Clear DR6 status register
+            try:
+                self._ptrace(PTRACE_POKEUSER, tid, DR_OFFSETS[6], 0)
+            except Exception:
+                pass
+
+            # 6. Apply modified registers and resume thread
+            # Resume flag is not needed since RIP has advanced past the breakpoint address
+            regs.eflags &= ~0x10000
+            self._ptrace(PTRACE_SETREGS, tid, 0, ctypes.addressof(regs))
+            self._ptrace(PTRACE_CONT, tid, 0, 0)
+            logger.debug("Bypassed in-game button handler on tid %d (redirected RIP to 0x%x)", tid, regs.rip)
         except Exception as e:
-            logger.error("Failed to suppress handler return for tid %d: %s", tid, e)
+            logger.error("Failed to bypass button action for tid %d: %s", tid, e)
+            # Fallback: resume normally with RF
+            try:
+                regs.eflags |= 0x10000
+                self._ptrace(PTRACE_SETREGS, tid, 0, ctypes.addressof(regs))
+                self._ptrace(PTRACE_CONT, tid, 0, 0)
+            except Exception:
+                pass

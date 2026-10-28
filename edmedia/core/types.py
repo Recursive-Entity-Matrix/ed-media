@@ -81,6 +81,7 @@ class AnchorReport:
     handlers: Dict[str, AnchorTarget] = field(default_factory=dict)
     refresh_driver: Optional[AnchorTarget] = None
     refresh_vtable: Optional[AnchorTarget] = None
+    audio_player_vtable: Optional[AnchorTarget] = None
     confidence: float = 0.0
 
     def to_dict(self) -> dict:
@@ -90,6 +91,7 @@ class AnchorReport:
             "handlers": {k: v.to_dict() for k, v in self.handlers.items()},
             "refresh_driver": self.refresh_driver.to_dict() if self.refresh_driver else None,
             "refresh_vtable": self.refresh_vtable.to_dict() if self.refresh_vtable else None,
+            "audio_player_vtable": self.audio_player_vtable.to_dict() if self.audio_player_vtable else None,
         }
 
 

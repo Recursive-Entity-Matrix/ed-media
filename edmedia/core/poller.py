@@ -20,10 +20,12 @@ class MediaPoller:
         self,
         media_controller: MediaController,
         on_track_changed: Optional[Callable[[TrackInfo], None]] = None,
+        on_periodic_sync: Optional[Callable[[TrackInfo], None]] = None,
         poll_interval: float = 1.0,
     ):
         self.media_controller = media_controller
         self.on_track_changed = on_track_changed
+        self.on_periodic_sync = on_periodic_sync
         self.poll_interval = poll_interval
         self._last_track: Optional[TrackInfo] = None
         self._running = False
@@ -57,6 +59,11 @@ class MediaPoller:
                 self.on_track_changed(track)
             except Exception as e:
                 logger.exception("Error executing track change callback: %s", e)
+        elif not changed and self.on_periodic_sync and track:
+            try:
+                self.on_periodic_sync(track)
+            except Exception as e:
+                logger.debug("Error executing periodic sync callback: %s", e)
 
         return track if changed else None
 
