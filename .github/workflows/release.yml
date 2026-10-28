@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os-name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            os-name: linux
+            archive-name: edmedia-${{ github.ref_name }}-linux-x86_64.tar.gz
+          - os: windows-latest
+            os-name: windows
+            archive-name: edmedia-${{ github.ref_name }}-windows-x86_64.zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libglib2.0-dev pkg-config
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          python -m pip install --upgrade pip
+          pip install .[linux,dev]
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          python -m pip install --upgrade pip
+          pip install .[windows,dev]
+
+      - name: Run test suite
+        run: |
+          python -m unittest discover tests
+
+      - name: Build executable with PyInstaller
+        run: |
+          python build_exe.py
+
+      - name: Package release archive (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir staging
+          cp dist/edmedia staging/
+          cp README.md staging/
+          tar -czf ${{ matrix.archive-name }} -C staging edmedia README.md
+
+      - name: Package release archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging
+          Copy-Item dist/edmedia.exe staging/
+          Copy-Item README.md staging/
+          Compress-Archive -Path staging/* -DestinationPath ${{ matrix.archive-name }}
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.archive-name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
