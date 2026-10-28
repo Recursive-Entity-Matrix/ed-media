@@ -65,8 +65,12 @@ def build():
         "pefile",
         "--hidden-import",
         "psutil",
-        str(entry_point),
     ]
+
+    if platform.system() == "Windows":
+        cmd.extend(["--collect-all", "winsdk"])
+
+    cmd.append(str(entry_point))
 
     print("Building EDMedia executable...")
     print("Command:", " ".join(cmd))
