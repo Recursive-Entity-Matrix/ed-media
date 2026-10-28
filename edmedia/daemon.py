@@ -94,13 +94,19 @@ class EDMediaDaemon:
 
         # Update in-game memory immediately with currently playing track
         if hasattr(self, "poller") and self.poller.current_track:
-            self.playlist_mgr.update_first_item(self.poller.current_track)
+            try:
+                self.playlist_mgr.update_first_item(self.poller.current_track)
+            except Exception as e:
+                logger.debug("Could not update playlist item: %s", e)
 
     def handle_track_changed(self, track: TrackInfo) -> None:
         """Invoked when desktop media changes tracks."""
         logger.info("Applying track to cockpit UI: %s", track.display_line)
         if hasattr(self, "playlist_mgr"):
-            self.playlist_mgr.update_first_item(track)
+            try:
+                self.playlist_mgr.update_first_item(track)
+            except Exception as e:
+                logger.debug("Could not update playlist item: %s", e)
         if hasattr(self, "tracer"):
             self.tracer.request_ui_refresh()
 

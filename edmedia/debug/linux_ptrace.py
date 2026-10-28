@@ -105,6 +105,7 @@ class LinuxPtraceTracer(BaseTracer):
         self._libc.ptrace.restype = ctypes.c_ulonglong
         self._mem_fd: Optional[int] = None
         self._attached_threads: Set[int] = set()
+        self._last_button_time: float = 0.0
         self._detect_runtime_base()
 
     def _ptrace(self, request: int, pid: int, addr: int = 0, data: int = 0) -> int:
@@ -369,31 +370,32 @@ class LinuxPtraceTracer(BaseTracer):
             bp = self.breakpoints[hit_index]
             controller_addr = regs.rcx  # 'this' pointer passed in RCX
 
-            if bp.kind == BreakpointKind.BUTTON_PLAY_PAUSE:
-                logger.info("Cockpit Play/Pause Trap on tid %d (controller=0x%x)", tid, controller_addr)
-                if self.on_button_pressed:
-                    self.on_button_pressed(ButtonKind.PLAY_PAUSE, controller_addr, tid)
-                self._suppress_and_return(tid, regs)
+            now = time.time()
+            if now - self._last_button_time >= 0.35:
+                self._last_button_time = now
+                try:
+                    if bp.kind == BreakpointKind.BUTTON_PLAY_PAUSE:
+                        logger.info("Cockpit Play/Pause Trap on tid %d (controller=0x%x)", tid, controller_addr)
+                        if self.on_button_pressed:
+                            self.on_button_pressed(ButtonKind.PLAY_PAUSE, controller_addr, tid)
 
-            elif bp.kind == BreakpointKind.BUTTON_NEXT:
-                logger.info("Cockpit Next Trap on tid %d (controller=0x%x) -> Suppressing queue advance", tid, controller_addr)
-                if self.on_button_pressed:
-                    self.on_button_pressed(ButtonKind.NEXT, controller_addr, tid)
-                # Suppress internal queue advancement: Return immediately to caller!
-                self._suppress_and_return(tid, regs)
+                    elif bp.kind == BreakpointKind.BUTTON_NEXT:
+                        logger.info("Cockpit Next Trap on tid %d (controller=0x%x)", tid, controller_addr)
+                        if self.on_button_pressed:
+                            self.on_button_pressed(ButtonKind.NEXT, controller_addr, tid)
 
-            elif bp.kind == BreakpointKind.BUTTON_PREV:
-                logger.info("Cockpit Previous Trap on tid %d (controller=0x%x) -> Suppressing queue advance", tid, controller_addr)
-                if self.on_button_pressed:
-                    self.on_button_pressed(ButtonKind.PREVIOUS, controller_addr, tid)
-                # Suppress internal queue advancement: Return immediately to caller!
-                self._suppress_and_return(tid, regs)
+                    elif bp.kind == BreakpointKind.BUTTON_PREV:
+                        logger.info("Cockpit Previous Trap on tid %d (controller=0x%x)", tid, controller_addr)
+                        if self.on_button_pressed:
+                            self.on_button_pressed(ButtonKind.PREVIOUS, controller_addr, tid)
 
-            elif bp.kind == BreakpointKind.UI_RENDER_LOOP:
-                if self.pending_ui_refresh:
-                    if self.on_ui_refresh:
-                        self.on_ui_refresh(tid)
-                    self.pending_ui_refresh = False
+                    elif bp.kind == BreakpointKind.UI_RENDER_LOOP:
+                        if self.pending_ui_refresh:
+                            if self.on_ui_refresh:
+                                self.on_ui_refresh(tid)
+                            self.pending_ui_refresh = False
+                except Exception as e:
+                    logger.exception("Error during breakpoint trap callback: %s", e)
 
         # Clear DR6 status register
         try:
@@ -401,11 +403,14 @@ class LinuxPtraceTracer(BaseTracer):
         except Exception:
             pass
 
-        # Resume thread
+        # Resume thread with RF (Resume Flag, bit 16 in EFLAGS = 0x10000)
+        # This tells the CPU to execute the current instruction without re-triggering #DB!
         try:
+            regs.eflags |= 0x10000  # Set Resume Flag (RF)
+            self._ptrace(PTRACE_SETREGS, tid, 0, ctypes.addressof(regs))
             self._ptrace(PTRACE_CONT, tid, 0, 0)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to resume thread %d: %s", tid, e)
 
     def _suppress_and_return(self, tid: int, regs: UserRegsStruct) -> None:
         """Simulate a 'ret' instruction: redirect RIP to [RSP] and advance RSP by 8."""
