@@ -129,13 +129,18 @@ class LinuxPtraceTracer(BaseTracer):
         try:
             with open(maps_path, "r") as f:
                 for line in f:
-                    if "EliteDangerous64.exe" in line and "r-xp" in line:
+                    if "EliteDangerous64.exe" in line:
                         base_str = line.split("-")[0]
                         base_va = int(base_str, 16)
-                        self.calculate_aslr_shift(base_va)
-                        break
+                        # Wine maps PE headers at 0x140000000 or the 64-bit base (>= 0x100000000)
+                        if base_va >= 0x100000000:
+                            self.calculate_aslr_shift(base_va)
+                            return
         except Exception as e:
             logger.warning("Could not read /proc/%d/maps: %s", self.pid, e)
+
+        # Fallback to preferred ImageBase (0x140000000)
+        self.calculate_aslr_shift(self.anchor_report.image_base)
 
     def attach(self) -> bool:
         """Attach to target process and all existing threads."""
@@ -263,8 +268,8 @@ class LinuxPtraceTracer(BaseTracer):
         # Update all currently attached threads
         for tid in list(self._attached_threads):
             try:
-                # Stop thread briefly to modify debug registers
-                os.kill(tid, signal.SIGSTOP)
+                # Stop thread briefly via tgkill to modify debug registers
+                self._libc.syscall(234, self.pid, tid, signal.SIGSTOP)  # SYS_tgkill
                 os.waitpid(tid, WALL_FLAG)
                 self._arm_thread_registers(tid)
                 self._ptrace(PTRACE_CONT, tid, 0, 0)
@@ -280,7 +285,7 @@ class LinuxPtraceTracer(BaseTracer):
         dr7 = self._compute_dr7()
         for tid in list(self._attached_threads):
             try:
-                os.kill(tid, signal.SIGSTOP)
+                self._libc.syscall(234, self.pid, tid, signal.SIGSTOP)  # SYS_tgkill
                 os.waitpid(tid, WALL_FLAG)
                 self._ptrace(PTRACE_POKEUSER, tid, DR_OFFSETS[dr_index], 0)
                 self._ptrace(PTRACE_POKEUSER, tid, DR_OFFSETS[7], dr7)

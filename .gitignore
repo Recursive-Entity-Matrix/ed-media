@@ -8,8 +8,17 @@ dist/
 *.egg-info/
 .eggs/
 
+# Environments
+.venv/
+env/
+venv/
+
+# PyInstaller
+*.spec
+
 # IDE
 .vscode/
 .idea/
 *.swp
 *~
+

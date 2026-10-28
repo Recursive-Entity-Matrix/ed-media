@@ -22,25 +22,49 @@ logger = logging.getLogger("edmedia")
 
 
 def find_elite_pid() -> Optional[int]:
-    """Find process ID of running EliteDangerous64.exe."""
+    """Find process ID of running EliteDangerous64.exe across native and Proton/Wine."""
     try:
         import psutil
-        for proc in psutil.process_iter(["pid", "name", "exe"]):
-            name = proc.info.get("name") or ""
-            if "EliteDangerous64.exe" in name:
-                return proc.info["pid"]
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                name = proc.info.get("name") or ""
+                cmdline = proc.info.get("cmdline") or []
+
+                # Exclude WatchDog and Launcher wrappers
+                if "WatchDog" in name or (cmdline and any("WatchDog" in str(arg) for arg in cmdline)):
+                    continue
+                if "EDLaunch" in name:
+                    continue
+
+                # 1. Direct name match (including Linux 15-char comm truncation 'EliteDangerous6')
+                if name.startswith("EliteDangerous"):
+                    return proc.pid
+
+                # 2. Command-line match under Wine/Proton (e.g. S:\...\EliteDangerous64.exe)
+                if cmdline and any(str(arg).lower().endswith("elitedangerous64.exe") for arg in cmdline):
+                    return proc.pid
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
     except ImportError:
-        # Fallback for Linux /proc scan
+        pass
+
+    # Fallback for Linux /proc scan without psutil
+    try:
         for entry in os.listdir("/proc"):
             if entry.isdigit():
                 try:
                     cmdline_path = f"/proc/{entry}/cmdline"
                     with open(cmdline_path, "rb") as f:
-                        cmdline = f.read().decode("latin-1", errors="ignore")
-                        if "EliteDangerous64.exe" in cmdline:
+                        raw = f.read()
+                        if b"WatchDog" in raw:
+                            continue
+                        if b"EliteDangerous64.exe" in raw:
                             return int(entry)
                 except Exception:
                     continue
+    except Exception:
+        pass
+
     return None
 
 
@@ -89,9 +113,10 @@ class EDMediaDaemon:
         report = engine.analyze()
         logger.info("PE Re-Anchor Confidence: %.1f%%", report.confidence * 100)
 
-        # 2. Initialize Tracer
+        # 2. Initialize Tracer and configure hooks
         self.tracer = get_platform_tracer(pid, report)
         self.tracer.on_button_pressed = self.handle_button_press
+        self.tracer.setup_default_hooks()
 
         # 3. Initialize Playlist Manager with process memory accessor
         class TracerMemoryAccessor:
@@ -104,12 +129,13 @@ class EDMediaDaemon:
 
         self.playlist_mgr = PlaylistManager(TracerMemoryAccessor(self.tracer))
 
-        # 4. Attach and arm hardware breakpoints
+        # 4. Attach and arm hardware breakpoints across all threads
         if not self.tracer.attach():
             logger.error("Failed to attach tracer to PID %d", pid)
             return
 
-        self.tracer.setup_default_hooks()
+        thread_count = len(getattr(self.tracer, "_attached_threads", []))
+        logger.info("Successfully attached to PID %d (%d threads armed with DR0-DR2)", pid, thread_count)
 
         # 5. Start Media Poller
         self.poller = MediaPoller(
@@ -119,9 +145,10 @@ class EDMediaDaemon:
         )
         self.poller.start()
 
-        # Perform initial sync
+        # Perform initial sync with currently active track
         initial_track = self.media_controller.get_current_track()
         if initial_track:
+            logger.info("Active track synced: %s [%s]", initial_track.display_line, initial_track.status.value)
             self.handle_track_changed(initial_track)
 
         # 6. Run event loop until stop_event or process termination
@@ -143,9 +170,11 @@ class EDMediaDaemon:
         signal.signal(signal.SIGINT, sig_handler)
         signal.signal(signal.SIGTERM, sig_handler)
 
+        waiting_logged = False
         while not self.stop_event.is_set():
             pid = find_elite_pid()
             if pid:
+                waiting_logged = False
                 try:
                     self.run_session(pid)
                 except Exception as e:
@@ -153,7 +182,9 @@ class EDMediaDaemon:
                 if once:
                     break
             else:
-                logger.debug("Waiting for EliteDangerous64.exe to launch...")
+                if not waiting_logged:
+                    logger.info("Waiting for EliteDangerous64.exe to launch...")
+                    waiting_logged = True
                 time.sleep(2.0)
 
         logger.info("EDMedia Daemon shutdown complete.")
